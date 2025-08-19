@@ -12,6 +12,9 @@ import re
 # Initialize FastAPI app
 app = FastAPI(title="AI Chatbot", version="1.0")
 
+# Mount static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -25,7 +28,8 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Mount templates
+# Mount static files and templates
+app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 # Task-specific prompt templates
@@ -127,10 +131,15 @@ Topic: {user_message}"""
 }
 
 def detect_task_type(message):
-    """Detect the type of writing task from the user's message."""
+    """Detect the type of task from the user's message."""
     message = message.lower()
     
-    # Define task patterns with their corresponding types
+    # First check if it's a coding request
+    code_patterns = ["code", "program", "script", "function", "class", "python", "java", "javascript"]
+    if any(pattern in message for pattern in code_patterns):
+        return "code"
+    
+    # Define writing task patterns
     task_patterns = {
         "leave_application": ["leave", "sick", "vacation", "absence", "day off"],
         "letter": ["letter", "formal letter", "write letter", "official letter"],
@@ -148,6 +157,19 @@ def detect_task_type(message):
 def enhance_prompt(message):
     """Enhance the user's prompt based on detected task type."""
     task_type = detect_task_type(message)
+    
+    # Handle coding requests
+    if task_type == "code":
+        if len(message.split()) < 5:  # If request is too short
+            return (
+                "I'll help you write code. Please be more specific about what you want to create. For example:\n"
+                "- 'Write a Python function to calculate factorial'\n"
+                "- 'Create a simple calculator program in Python'\n"
+                "- 'Write a Python script to read and write files'"
+            )
+        return "You are a Python programming expert. Please write clear, well-commented code for this request: " + message
+    
+    # Handle writing tasks
     if task_type and task_type in PROMPT_TEMPLATES:
         # Add helpful tips for incomplete requests
         if len(message.split()) < 8:  # If request is too short
@@ -161,7 +183,7 @@ def enhance_prompt(message):
         
         return PROMPT_TEMPLATES[task_type].format(user_message=message)
     
-    return "You are a professional writer. Your task is to provide a clear, well-structured response to this request: " + message
+    return "You are a professional assistant. Your task is to provide a clear, well-structured response to this request: " + message
 
 # Initialize the Hugging Face client with retries
 def get_client(max_retries=3):
@@ -206,7 +228,11 @@ async def reset_chat(req: ResetRequest):
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    try:
+        return templates.TemplateResponse("index.html", {"request": request})
+    except Exception as e:
+        logger.error(f"Error rendering template: {str(e)}")
+        return HTMLResponse(content="Error loading page. Check server logs.", status_code=500)
 
 @app.post("/send_message")
 async def send_message(req: ChatRequest):
@@ -304,7 +330,21 @@ async def send_message(req: ChatRequest):
                             r"please provide"  # Added to catch unhelpful "please provide" responses
                         ]
                         
-                        # Skip validation for well-formed requests
+                        # Handle code requests differently
+                        task_type = detect_task_type(message)
+                        if task_type == "code":
+                            # Skip thanks/feedback responses for code requests
+                            if any(word in bot_response.lower() for word in ["thanks", "thank you", "feedback", "writing"]):
+                                logger.warning(f"Detected unhelpful code response: {bot_response}")
+                                return {
+                                    "response": "I'll help you write Python code. Please be specific about what you want to create. For example:\n"
+                                               "- 'Write a Python function to calculate factorial'\n"
+                                               "- 'Create a simple calculator program in Python'\n"
+                                               "- 'Write a Python script to read and write files'"
+                                }
+                            return {"response": bot_response}
+
+                        # Skip validation for well-formed writing requests
                         if message.lower().startswith("write a") and len(message.split()) >= 8:
                             return {"response": bot_response}
                             
@@ -374,3 +414,7 @@ async def send_message(req: ChatRequest):
                 chat_history = []  # Reset on error
                 error_msg = "I'm having trouble with the connection. Please try again with a specific request."
                 return {"response": error_msg}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
