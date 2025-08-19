@@ -125,7 +125,6 @@ Follow this structure:
 Word count: Match the requested length
 Topic: {user_message}"""
 }
-}
 
 def detect_task_type(message):
     """Detect the type of writing task from the user's message."""
@@ -222,21 +221,42 @@ async def send_message(req: ChatRequest):
             return {"response": "Sorry, I'm having trouble connecting to the server. Please try again later."}
     
     # If message is asking for a specific task, clear history and enhance prompt
-    message = req.message
-    if any(keyword in message.lower() for keyword in ["write", "create", "generate", "help me with"]):
-        chat_history = []
+    message = req.message.strip()
+    # Only enhance prompt if it's not already a well-formed request
+    if not (message.lower().startswith(("write", "create", "generate")) and len(message.split()) >= 8):
         message = enhance_prompt(message)
         logger.info(f"Enhanced prompt: {message}")
+    chat_history = []  # Always start fresh for writing tasks
     
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            # Separate template from actual message
+            task_type = detect_task_type(message)
+            actual_message = message
+            template = None
+            
+            if task_type and task_type in PROMPT_TEMPLATES:
+                template = PROMPT_TEMPLATES[task_type]
+                # Only send the user's actual request to the model
+                actual_message = message
+            
             # Make API call to the chatbot
             output = client.predict(
-                message,
-                chat_history,
+                actual_message,
+                chat_history if not template else [],  # Clear history if using template
                 api_name="/chat_with_bot"
             )
+            
+            # Post-process the response if template was used
+            if template and isinstance(output, list) and len(output) > 0:
+                latest = output[-1]
+                if isinstance(latest, list) and len(latest) == 2:
+                    bot_response = latest[1]
+                    if not any(pattern in bot_response.lower() for pattern in ["thank", "insight", "report", "i'll add"]):
+                        # Format the response according to the template
+                        formatted_response = template.format(user_message=bot_response)
+                        output = [[actual_message, formatted_response]]
             
             # Handle the response
             logger.info(f"Raw output: {output}")
@@ -272,7 +292,7 @@ async def send_message(req: ChatRequest):
                             r"^no[.,]?$",
                             r"heh?e?h?e?",
                             r"^how to",
-                            r"^i think",
+                            r"^i need more",  # Changed to be more specific
                             r"^i believe",
                             r"read.*guides",
                             r"do your own",
@@ -280,9 +300,14 @@ async def send_message(req: ChatRequest):
                             r"send him",
                             r"what do you do",
                             r"^help",
-                            r"[?]$"  # Responses ending with question mark are often unhelpful
+                            r"[?]$",  # Responses ending with question mark are often unhelpful
+                            r"please provide"  # Added to catch unhelpful "please provide" responses
                         ]
                         
+                        # Skip validation for well-formed requests
+                        if message.lower().startswith("write a") and len(message.split()) >= 8:
+                            return {"response": bot_response}
+                            
                         if any(re.search(pattern, bot_response.lower()) for pattern in unhelpful_patterns):
                             logger.warning(f"Detected unhelpful response: {bot_response}")
                             chat_history = []  # Reset the conversation
